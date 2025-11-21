@@ -97,6 +97,9 @@ def receive_loop(sock: socket.socket) -> None:
     except Exception as e:
         print(f"\n[ERRO RECEIVE LOOP] {e}")
     finally:
+        # ===== garante que ninguém fique travado esperando se a conexão cair =====
+        waiting_for_file.set()
+        waiting_for_chat.set()
         print("[CLIENTE] Loop de recepção encerrado.")
 
 

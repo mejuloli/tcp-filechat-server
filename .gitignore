@@ -1,0 +1,24 @@
+# ==== python básico ====
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# logs e temps
+*.log
+*.tmp
+*.swp
+*.bak
+
+# ambientes virtuais
+venv/
+.venv/
+env/
+.env/
+
+# configs de IDE (VS Code, PyCharm, etc.)
+.vscode/
+.idea/
+
+# arquivos gerados em tempo de execução
+downloads/

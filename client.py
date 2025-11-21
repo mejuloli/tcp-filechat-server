@@ -1,12 +1,21 @@
+# client.py
 import socket
 import threading
 import os
 import hashlib
-from protocol import (
-    send_header,
-    recv_header,
-    recv_exact,
-)
+
+from protocol import recv_header, recv_exact
+
+# ===== eventos para sincronizar a thread do menu com a thread de recepção =====
+waiting_for_file = threading.Event()
+waiting_for_chat = threading.Event()
+
+
+def show_menu():
+    menu = (
+        "\n--- MENU ---\n1 - Chat (enviar mensagem)\n2 - Solicitar arquivo\n3 - Sair\n"
+    )
+    print(menu, end="")
 
 
 def receive_loop(sock: socket.socket) -> None:
@@ -30,6 +39,8 @@ def receive_loop(sock: socket.socket) -> None:
                 origin = header.get("from", "SERVIDOR")
                 message = header.get("message", "")
                 print(f"\n[CHAT - {origin}] {message}")
+                # ===== avisa que pelo menos uma mensagem de chat chegou =====
+                waiting_for_chat.set()
 
             elif msg_type == "FILE_INFO":
                 status = header.get("status")
@@ -38,6 +49,8 @@ def receive_loop(sock: socket.socket) -> None:
                 if status != "OK":
                     message = header.get("message", "Erro ao receber arquivo.")
                     print(f"\n[ARQUIVO] Erro ao solicitar '{filename}': {message}")
+                    # ===== sinaliza que terminou de tratar essa requisição de arquivo =====
+                    waiting_for_file.set()
                     continue
 
                 filesize = int(header.get("filesize", 0))
@@ -69,6 +82,9 @@ def receive_loop(sock: socket.socket) -> None:
                     print("[ARQUIVO] Arquivo recebido com SUCESSO (integridade OK).")
                 else:
                     print("[ARQUIVO] ERRO: Arquivo corrompido (hash diferente).")
+
+                # ===== terminou de tratar o arquivo (sucesso ou falha de integridade) =====
+                waiting_for_file.set()
 
             elif msg_type == "BYE":
                 message = header.get("message", "Conexão encerrada.")
@@ -105,33 +121,38 @@ def main():
 
     print(f"Conectado ao servidor {host}:{port}")
 
-    # ===== inicia a thread de recepção =====
+    # ===== inicia thread de recepção =====
     t = threading.Thread(target=receive_loop, args=(sock,), daemon=True)
     t.start()
 
     try:
         while True:
-            print("\n--- MENU ---")
-            print("1 - Chat (enviar mensagem)")
-            print("2 - Solicitar arquivo")
-            print("3 - Sair")
+            show_menu()
             opc = input("Escolha uma opção: ").strip()
 
             if opc == "1":
                 msg = input("Digite sua mensagem de chat: ").strip()
                 if msg:
-                    # ===== envia comando de texto: CHAT <mensagem>\n ====
+                    # ===== prepara para esperar o eco do chat =====
+                    waiting_for_chat.clear()
                     line = f"CHAT {msg}\n"
                     sock.sendall(line.encode("utf-8"))
+                    # ===== espera até 2 segundos por alguma mensagem de chat (eco) =====
+                    waiting_for_chat.wait(timeout=2.0)
 
             elif opc == "2":
                 filename = input("Nome do arquivo no servidor: ").strip()
                 if filename:
+                    # ===== prepara para esperar o término da transferência de arquivo =====
+                    waiting_for_file.clear()
                     line = f"ARQUIVO {filename}\n"
                     sock.sendall(line.encode("utf-8"))
+                    print("[CLIENTE] Aguardando transferência de arquivo terminar...")
+                    # ===== bloqueia até a thread de recepção sinalizar que acabou =====
+                    waiting_for_file.wait()
+                    print("[CLIENTE] Operação de arquivo finalizada.")
 
             elif opc == "3":
-                # ===== envia SAIR e encerra o cliente =====
                 sock.sendall(b"SAIR\n")
                 print("Encerrando cliente...")
                 break

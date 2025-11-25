@@ -125,7 +125,7 @@ def main():
     print(f"Conectado ao servidor {host}:{port}")
 
     # ===== inicia thread de recepção =====
-    t = threading.Thread(target=receive_loop, args=(sock,), daemon=True)
+    t = threading.Thread(target=receive_loop, args=(sock,))
     t.start()
 
     try:
@@ -170,6 +170,10 @@ def main():
             sock.close()
         except Exception:
             pass
+
+        # espera thread terminar para não imprimir durante shutdown
+        t.join()
+
         print("[CLIENTE] Conexão fechada. Fim.")
 
 

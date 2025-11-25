@@ -3,7 +3,7 @@ import threading
 import os
 import hashlib
 import sys
-from protocol import send_header, recv_header, recv_exact
+from protocol import send_header
 
 HOST = "0.0.0.0"
 PORT = 5000  # porta > 1024

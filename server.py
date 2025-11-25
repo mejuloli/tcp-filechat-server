@@ -23,6 +23,9 @@ clients_lock = threading.Lock()
 _client_id_counter = 0
 client_id_lock = threading.Lock()
 
+# ===== evento global para sinalizar desligamento do servidor =====
+shutdown_event = threading.Event()
+
 
 def next_client_id() -> int:
     global _client_id_counter
@@ -60,6 +63,34 @@ def broadcast_chat(message: str, from_name: str = "SERVIDOR") -> None:
             except Exception:
                 pass
             clients.remove(c)
+
+
+def shutdown_all_clients(reason: str) -> None:
+    """
+    Envia BYE para todos os clientes ainda conectados e fecha os sockets.
+    """
+    header = {"type": "BYE", "message": reason}
+
+    with clients_lock:
+        # primeiro tenta avisar todo mundo
+        for client in clients:
+            conn = client["socket"]
+            lock = client["send_lock"]
+            try:
+                with lock:
+                    send_header(conn, header)
+            except Exception:
+                # se falhar, segue em frente
+                pass
+
+        # depois fecha os sockets e limpa a lista
+        for client in clients:
+            try:
+                client["socket"].close()
+            except Exception:
+                pass
+
+        clients.clear()
 
 
 def handle_file_request(client_info: dict, filename: str) -> None:
@@ -152,6 +183,19 @@ def handle_client(conn: socket.socket, addr) -> None:
 
     try:
         while True:
+            if shutdown_event.is_set():
+                # servidor em desligamento: encerra educadamente
+                print(
+                    f"[INFO] Encerrando conexão com cliente {client_id} por shutdown."
+                )
+                header = {
+                    "type": "BYE",
+                    "message": "Servidor está sendo encerrado.",
+                }
+                with client_info["send_lock"]:
+                    send_header(conn, header)
+                break
+
             line = conn_file.readline()
             if not line:
                 print(f"[DESCONECTADO] Cliente {client_id} fechou a conexão.")
@@ -231,10 +275,13 @@ def server_console() -> None:
         if not msg:
             continue
         if msg.strip().lower() == "/quit":
-            print(
-                "[CONSOLE] Encerrando servidor (utilize Ctrl+C para forçar o encerramento imediato)..."
+            print("[CONSOLE] Solicitação de encerramento do servidor recebida.")
+            # sinaliza para o loop principal encerrar
+            shutdown_event.set()
+            # avisa os clientes via chat
+            broadcast_chat(
+                "Servidor será encerrado pelo administrador.", from_name="SERVIDOR"
             )
-            # ===== envia mensagem de encerramento =====
             break
         broadcast_chat(msg, from_name="SERVIDOR")
 
@@ -245,6 +292,8 @@ def main():
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         s.bind((HOST, PORT))
         s.listen()
+        # timeout para poder checar o shutdown_event periodicamente
+        s.settimeout(1.0)
         print(f"[OK] Servidor escutando em {HOST}:{PORT}")
 
         # ===== thread de console para chat do servidor =====
@@ -252,22 +301,23 @@ def main():
         console_thread.start()
 
         try:
-            while True:
-                conn, addr = s.accept()
+            while not shutdown_event.is_set():
+                try:
+                    conn, addr = s.accept()
+                except socket.timeout:
+                    # verifica de novo se pediram shutdown
+                    continue
+
                 t = threading.Thread(
                     target=handle_client, args=(conn, addr), daemon=True
                 )
                 t.start()
         except KeyboardInterrupt:
             print("\n[ENCERRANDO] Servidor interrompido por KeyboardInterrupt.")
+            shutdown_event.set()
         finally:
-            with clients_lock:
-                for c in clients:
-                    try:
-                        c["socket"].close()
-                    except Exception:
-                        pass
-                clients.clear()
+            print("[ENCERRANDO] Fechando conexões com clientes...")
+            shutdown_all_clients("Servidor está sendo encerrado.")
             print("[FIM] Servidor encerrado.")
 
 

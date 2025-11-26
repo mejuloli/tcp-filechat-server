@@ -10,11 +10,15 @@ from protocol import recv_header, recv_exact
 waiting_for_file = threading.Event()
 waiting_for_chat = threading.Event()
 
-# ===== controle de "modo arquivo" (do pedido até o fim do processamento) =====
+# ===== controle de operação de arquivo e fila de chats =====
+pending_file_operation = False
 pending_file_operation_lock = threading.Lock()
-pending_file_operation = (
-    False  # True = suprimir/guardar chats até o fim da operação de arquivo
-)
+
+pending_chats = []  # lista de tuplas (origin, message)
+pending_chats_lock = threading.Lock()
+
+# evento para dizer que existem chats a serem mostrados depois do arquivo
+chats_after_file = threading.Event()
 
 
 def show_menu():
@@ -32,9 +36,6 @@ def receive_loop(sock: socket.socket) -> None:
     - BYE
     """
     global pending_file_operation
-
-    # fila de mensagens de chat recebidas enquanto houver operação de arquivo pendente
-    pending_chats = []  # lista de tuplas (origin, message)
 
     try:
         while True:
@@ -57,7 +58,9 @@ def receive_loop(sock: socket.socket) -> None:
 
                 if suppress_chat:
                     # guarda para mostrar depois do término da operação de arquivo
-                    pending_chats.append((origin, message))
+                    with pending_chats_lock:
+                        pending_chats.append((origin, message))
+                    # não imprime agora
                 else:
                     # pode imprimir normalmente
                     print(f"\n[CHAT - {origin}] {message}")
@@ -70,7 +73,7 @@ def receive_loop(sock: socket.socket) -> None:
                 status = header.get("status")
                 filename = header.get("filename", "arquivo_desconhecido")
 
-                # se arquivo não foi encontrado ou houve erro genérico
+                # caso de erro (arquivo não encontrado, etc.)
                 if status != "OK":
                     message = header.get("message", "Erro ao receber arquivo.")
                     print(f"\n[ARQUIVO] Erro ao solicitar '{filename}': {message}")
@@ -79,15 +82,12 @@ def receive_loop(sock: socket.socket) -> None:
                     with pending_file_operation_lock:
                         pending_file_operation = False
 
-                    # despeja chats pendentes (se houver)
-                    if pending_chats:
-                        print(
-                            "\n[CHAT] Mensagens recebidas enquanto a operação de arquivo estava em andamento:"
-                        )
-                        for origin, message in pending_chats:
-                            print(f"[CHAT - {origin}] {message}")
-                        pending_chats.clear()
+                    # se tiver chats pendentes, marca para mostrar depois
+                    with pending_chats_lock:
+                        if pending_chats:
+                            chats_after_file.set()
 
+                    # sinaliza que terminou de tratar essa requisição de arquivo
                     waiting_for_file.set()
                     continue
 
@@ -126,14 +126,10 @@ def receive_loop(sock: socket.socket) -> None:
                 with pending_file_operation_lock:
                     pending_file_operation = False
 
-                # depois de receber/processar o arquivo, despeja o chat pendente (se houver)
-                if pending_chats:
-                    print(
-                        "\n[CHAT] Mensagens recebidas enquanto o arquivo era transferido:"
-                    )
-                    for origin, message in pending_chats:
-                        print(f"[CHAT - {origin}] {message}")
-                    pending_chats.clear()
+                # se tiver chats pendentes, marca para mostrar DEPOIS
+                with pending_chats_lock:
+                    if pending_chats:
+                        chats_after_file.set()
 
                 # sinaliza para a thread do menu que terminou a operação de arquivo
                 waiting_for_file.set()
@@ -214,6 +210,18 @@ def main():
                     # bloqueia até a thread de recepção sinalizar que acabou
                     waiting_for_file.wait()
                     print("[CLIENTE] Operação de arquivo finalizada.")
+
+                    # só agora, DEPOIS de finalizar, mostra os chats pendentes, se houver
+                    if chats_after_file.is_set():
+                        with pending_chats_lock:
+                            if pending_chats:
+                                print(
+                                    "\n[CHAT] Mensagens recebidas enquanto o arquivo era transferido:"
+                                )
+                                for origin, message in pending_chats:
+                                    print(f"[CHAT - {origin}] {message}")
+                                pending_chats.clear()
+                        chats_after_file.clear()
 
             # ===== SAIR =====
             elif opc == "3":

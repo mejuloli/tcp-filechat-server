@@ -10,6 +10,12 @@ from protocol import recv_header, recv_exact
 waiting_for_file = threading.Event()
 waiting_for_chat = threading.Event()
 
+# ===== controle de "modo arquivo" (do pedido até o fim do processamento) =====
+pending_file_operation_lock = threading.Lock()
+pending_file_operation = (
+    False  # True = suprimir/guardar chats até o fim da operação de arquivo
+)
+
 
 def show_menu():
     menu = (
@@ -25,6 +31,11 @@ def receive_loop(sock: socket.socket) -> None:
     - FILE_INFO (com transferência de arquivo)
     - BYE
     """
+    global pending_file_operation
+
+    # fila de mensagens de chat recebidas enquanto houver operação de arquivo pendente
+    pending_chats = []  # lista de tuplas (origin, message)
+
     try:
         while True:
             try:
@@ -35,24 +46,52 @@ def receive_loop(sock: socket.socket) -> None:
 
             msg_type = header.get("type")
 
+            # ===== mensagens de CHAT =====
             if msg_type == "CHAT":
                 origin = header.get("from", "SERVIDOR")
                 message = header.get("message", "")
-                print(f"\n[CHAT - {origin}] {message}")
-                # ===== avisa que pelo menos uma mensagem de chat chegou =====
+
+                # verifica se há operação de arquivo pendente
+                with pending_file_operation_lock:
+                    suppress_chat = pending_file_operation
+
+                if suppress_chat:
+                    # guarda para mostrar depois do término da operação de arquivo
+                    pending_chats.append((origin, message))
+                else:
+                    # pode imprimir normalmente
+                    print(f"\n[CHAT - {origin}] {message}")
+
+                # avisa que pelo menos uma mensagem de chat chegou
                 waiting_for_chat.set()
 
+            # ===== informações de ARQUIVO + dados =====
             elif msg_type == "FILE_INFO":
                 status = header.get("status")
                 filename = header.get("filename", "arquivo_desconhecido")
 
+                # se arquivo não foi encontrado ou houve erro genérico
                 if status != "OK":
                     message = header.get("message", "Erro ao receber arquivo.")
                     print(f"\n[ARQUIVO] Erro ao solicitar '{filename}': {message}")
-                    # ===== sinaliza que terminou de tratar essa requisição de arquivo =====
+
+                    # fim da operação de arquivo (mesmo com erro)
+                    with pending_file_operation_lock:
+                        pending_file_operation = False
+
+                    # despeja chats pendentes (se houver)
+                    if pending_chats:
+                        print(
+                            "\n[CHAT] Mensagens recebidas enquanto a operação de arquivo estava em andamento:"
+                        )
+                        for origin, message in pending_chats:
+                            print(f"[CHAT - {origin}] {message}")
+                        pending_chats.clear()
+
                     waiting_for_file.set()
                     continue
 
+                # ---- caso OK: segue com a transferência de arquivo ----
                 filesize = int(header.get("filesize", 0))
                 expected_hash = header.get("sha256", "")
 
@@ -83,9 +122,23 @@ def receive_loop(sock: socket.socket) -> None:
                 else:
                     print("[ARQUIVO] ERRO: Arquivo corrompido (hash diferente).")
 
-                # ===== terminou de tratar o arquivo (sucesso ou falha de integridade) =====
+                # fim da operação de arquivo (sucesso ou falha de integridade)
+                with pending_file_operation_lock:
+                    pending_file_operation = False
+
+                # depois de receber/processar o arquivo, despeja o chat pendente (se houver)
+                if pending_chats:
+                    print(
+                        "\n[CHAT] Mensagens recebidas enquanto o arquivo era transferido:"
+                    )
+                    for origin, message in pending_chats:
+                        print(f"[CHAT - {origin}] {message}")
+                    pending_chats.clear()
+
+                # sinaliza para a thread do menu que terminou a operação de arquivo
                 waiting_for_file.set()
 
+            # ===== BYE: servidor encerrando conexão =====
             elif msg_type == "BYE":
                 message = header.get("message", "Conexão encerrada.")
                 print(f"\n[SERVER] {message}")
@@ -97,13 +150,15 @@ def receive_loop(sock: socket.socket) -> None:
     except Exception as e:
         print(f"\n[ERRO RECEIVE LOOP] {e}")
     finally:
-        # ===== garante que ninguém fique travado esperando se a conexão cair =====
+        # garante que ninguém fique travado esperando se a conexão cair
         waiting_for_file.set()
         waiting_for_chat.set()
         print("[CLIENTE] Loop de recepção encerrado.")
 
 
 def main():
+    global pending_file_operation
+
     print("=== Cliente TCP ===")
     host = input("IP do servidor [127.0.0.1]: ").strip() or "127.0.0.1"
     port_str = input("Porta do servidor [5000]: ").strip() or "5000"
@@ -133,28 +188,34 @@ def main():
             show_menu()
             opc = input("Escolha uma opção: ").strip()
 
+            # ===== CHAT =====
             if opc == "1":
                 msg = input("Digite sua mensagem de chat: ").strip()
                 if msg:
-                    # ===== prepara para esperar o eco do chat =====
+                    # prepara para esperar uma possível resposta de chat
                     waiting_for_chat.clear()
                     line = f"CHAT {msg}\n"
                     sock.sendall(line.encode("utf-8"))
-                    # ===== espera até 2 segundos por alguma mensagem de chat (eco) =====
+                    # espera até 2 segundos por alguma mensagem de chat
                     waiting_for_chat.wait(timeout=2.0)
 
+            # ===== ARQUIVO =====
             elif opc == "2":
                 filename = input("Nome do arquivo no servidor: ").strip()
                 if filename:
-                    # ===== prepara para esperar o término da transferência de arquivo =====
+                    # marca início de uma operação de arquivo (do pedido até o fim do tratamento)
+                    with pending_file_operation_lock:
+                        pending_file_operation = True
+
                     waiting_for_file.clear()
                     line = f"ARQUIVO {filename}\n"
                     sock.sendall(line.encode("utf-8"))
                     print("[CLIENTE] Aguardando transferência de arquivo terminar...")
-                    # ===== bloqueia até a thread de recepção sinalizar que acabou =====
+                    # bloqueia até a thread de recepção sinalizar que acabou
                     waiting_for_file.wait()
                     print("[CLIENTE] Operação de arquivo finalizada.")
 
+            # ===== SAIR =====
             elif opc == "3":
                 sock.sendall(b"SAIR\n")
                 print("Encerrando cliente...")

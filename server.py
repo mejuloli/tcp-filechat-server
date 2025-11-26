@@ -1,8 +1,10 @@
+# server.py
 import socket
 import threading
 import os
 import hashlib
 import sys
+
 from protocol import send_header
 
 HOST = "0.0.0.0"
@@ -15,11 +17,12 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 FILES_DIR = os.path.join(BASE_DIR, "server_files")
 os.makedirs(FILES_DIR, exist_ok=True)
 
-# ===== lista dos clientes conectados =====
-# ===== cada item: {"socket": conn, "address": addr_str, "id": int, "send_lock": Lock} =====
+# ===== lista global de clientes conectados =====
+# cada item é um dict: {"id": int, "socket": socket, "send_lock": Lock, "address": (ip, port)}
 clients = []
 clients_lock = threading.Lock()
 
+# ===== controle de IDs de clientes =====
 _client_id_counter = 0
 client_id_lock = threading.Lock()
 
@@ -34,11 +37,11 @@ def next_client_id() -> int:
         return _client_id_counter
 
 
-def broadcast_chat(message: str, from_name: str = "SERVIDOR") -> None:
+def broadcast_chat(message: str, from_name: str = "SERVIDOR", exclude_id=None) -> None:
     """
     - envia uma mensagem de chat para todos os clientes conectados.
     - usa o protocolo: cabeçalho JSON com type="CHAT".
-    - não envia nada se não houver clientes.
+    - se exclude_id for fornecido, não envia para esse cliente.
     """
     header = {
         "type": "CHAT",
@@ -48,6 +51,10 @@ def broadcast_chat(message: str, from_name: str = "SERVIDOR") -> None:
     with clients_lock:
         dead_clients = []
         for client in clients:
+            # se for para excluir um cliente específico, pula ele
+            if exclude_id is not None and client.get("id") == exclude_id:
+                continue
+
             conn = client["socket"]
             lock = client["send_lock"]
             try:
@@ -56,6 +63,7 @@ def broadcast_chat(message: str, from_name: str = "SERVIDOR") -> None:
             except Exception:
                 # ===== marca para remoção (cliente desconectou) =====
                 dead_clients.append(client)
+
         # ===== remove clientes mortos =====
         for c in dead_clients:
             try:
@@ -166,10 +174,10 @@ def handle_client(conn: socket.socket, addr) -> None:
     addr_str = f"{addr[0]}:{addr[1]}"
 
     client_info = {
-        "socket": conn,
-        "address": addr_str,
         "id": client_id,
+        "socket": conn,
         "send_lock": threading.Lock(),
+        "address": addr,
     }
 
     with clients_lock:
@@ -225,8 +233,12 @@ def handle_client(conn: socket.socket, addr) -> None:
                 else:
                     message = ""
                 print(f"[CHAT] De cliente {client_id} ({addr_str}): {message}")
-                # ===== repassa para todos os clientes (incluindo ele mesmo) =====
-                broadcast_chat(message, from_name=f"CLIENTE {client_id}")
+                # ===== repassa para todos os outros clientes, exceto quem enviou =====
+                broadcast_chat(
+                    message,
+                    from_name=f"CLIENTE {client_id}",
+                    exclude_id=client_id,
+                )
 
             elif command == "ARQUIVO":
                 if len(parts) != 2 or not parts[1]:
@@ -305,7 +317,6 @@ def main():
                 try:
                     conn, addr = s.accept()
                 except socket.timeout:
-                    # verifica de novo se pediram shutdown
                     continue
 
                 t = threading.Thread(
